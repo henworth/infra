@@ -1,0 +1,13 @@
+# Ministack: local AWS emulator. State is persisted in `./.ministack/` so RDS
+# instances and Secrets survive `docker compose down`. Use scripts/cdklocal-deploy.sh
+# to drive deploys against the emulator.
+services:
+  ministack:
+    image: ministackorg/ministack:latest
+    ports:
+      - "4566:4566"
+    environment:
+      DEBUG: "1"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./.ministack/data:/var/lib/ministack

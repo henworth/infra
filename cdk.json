@@ -1,0 +1,19 @@
+{
+  "app": "uv run python app.py",
+  "watch": {
+    "include": ["**"],
+    "exclude": [
+      "README.md",
+      "cdk*.json",
+      ".venv",
+      "uv.lock",
+      "**/__pycache__",
+      "lambdas/db_bootstrap/build"
+    ]
+  },
+  "context": {
+    "@aws-cdk/aws-iam:minimizePolicies": true,
+    "@aws-cdk/core:newStyleStackSynthesis": true,
+    "@aws-cdk/aws-ecs:enableExecuteCommandLogging": false
+  }
+}

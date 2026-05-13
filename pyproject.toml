@@ -1,0 +1,27 @@
+[project]
+name = "pantry-infra"
+version = "0.1.0"
+description = "CDK control plane for pantry microservices preview environments"
+requires-python = ">=3.12"
+dependencies = [
+  "aws-cdk-lib>=2.150",
+  "boto3>=1.34",
+  "constructs>=10",
+  "httpx>=0.27",
+  "pg8000>=1.30",
+]
+
+[dependency-groups]
+dev = [
+  "pyright>=1.1.409",
+  "pytest>=8",
+  "ruff>=0.6",
+]
+
+[tool.pyright]
+venvPath = "."
+venv = ".venv"
+
+[tool.ruff]
+line-length = 120
+target-version = "py312"

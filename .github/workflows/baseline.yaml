@@ -1,0 +1,48 @@
+name: baseline
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "app.py"
+      - "cdk.json"
+      - "stacks/**"
+      - "lambdas/**"
+      - "scripts/build-lambdas.sh"
+      - "pyproject.toml"
+      - "uv.lock"
+      - ".github/workflows/baseline.yml"
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  AWS_REGION: us-east-1
+
+jobs:
+  deploy-baseline:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+
+      - name: uv sync
+        run: uv sync --locked
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Build Lambda bundle
+        run: bash scripts/build-lambdas.sh
+
+      - name: CDK deploy BaselineStack
+        run: npx -y aws-cdk deploy --require-approval never BaselineStack
+        env:
+          GITHUB_ORG: ${{ github.repository_owner }}

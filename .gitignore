@@ -1,0 +1,19 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+
+# CDK
+cdk.out/
+cdk.context.json
+
+# Lambda bundles
+lambdas/db_bootstrap/build/
+
+# Ministack persisted state (created by docker-compose.ministack.yaml)
+.ministack/
+
+# Local env / OS artifacts
+.env
+.DS_Store
