@@ -1,4 +1,9 @@
-"""Long-lived baseline stack: VPC, Aurora SLv2, ECS cluster, ALB, ECR, GitHub OIDC, db_bootstrap Lambda.
+"""Long-lived baseline stack: VPC, Aurora SLv2, ECR repos, GitHub OIDC, and
+the `db_bootstrap` Lambda used by EnvironmentStack to provision per-env
+logical databases.
+
+There's intentionally no ALB or ECS here — services are deployed per-env as
+Lambda functions with their own Function URLs (see `EnvironmentStack`).
 
 When `ministack_mode=True`, OIDC and the db_bootstrap Lambda are omitted (those
 features rely on Lambda containers that can't reach IAM / RDS on Ministack).
@@ -14,8 +19,6 @@ from aws_cdk import (
     Stack,
     aws_ec2 as ec2,
     aws_ecr as ecr,
-    aws_ecs as ecs,
-    aws_elasticloadbalancingv2 as elbv2,
     aws_iam as iam,
     aws_lambda as _lambda,
     aws_logs as logs,
@@ -44,10 +47,9 @@ class BaselineStack(Stack):
         self.ministack_mode = ministack_mode
 
         if ministack_mode:
-            # Ministack rejects AWS::EC2::EIP, so no NAT gateways. Skip private
-            # subnets with egress entirely; ECS tasks run in public subnets and
-            # the DB (real Postgres container created out-of-band) lives in the
-            # isolated subnets.
+            # Ministack rejects AWS::EC2::EIP, so no NAT gateways. Service
+            # Lambdas in Ministack mode don't run in VPC anyway (they reach
+            # the Ministack-managed Postgres via host.docker.internal).
             self.vpc = ec2.Vpc(
                 self,
                 "Vpc",
@@ -67,6 +69,9 @@ class BaselineStack(Stack):
                 ],
             )
         else:
+            # Service Lambdas attach to PRIVATE_WITH_EGRESS subnets so they can
+            # (a) reach Aurora in the isolated tier and (b) hit each other's
+            # Function URLs over the public internet via the NAT gateway.
             self.vpc = ec2.Vpc(
                 self,
                 "Vpc",
@@ -93,35 +98,34 @@ class BaselineStack(Stack):
 
         if ministack_mode:
             # Ministack rejects standalone `AWS::EC2::SecurityGroupIngress`
-            # resources, which CDK emits any time it adds an SG-to-SG ingress
-            # rule (this happens automatically when an ALB attaches to a
-            # target group, and even for from-self rules). Workaround:
-            # collapse to a single shared SG with CIDR-only inline ingress.
-            # CIDR-peer rules always inline as the SG's SecurityGroupIngress
-            # property; the L2 ALB construct's auto-added SG-to-SG rules then
-            # become no-ops because everyone is already in the same SG and
-            # all ports are already open.
+            # resources. Collapse Lambda + DB into a single shared SG with
+            # CIDR-only inline ingress; SG-to-SG rules are then unnecessary
+            # because everything is already in the same SG.
             shared_sg = ec2.SecurityGroup(
                 self,
                 "SharedSg",
                 vpc=self.vpc,
-                description="Ministack-only shared SG for ALB, services, and DB",
+                description="Ministack-only shared SG for service Lambdas and DB",
                 allow_all_outbound=True,
             )
-            shared_sg.add_ingress_rule(ec2.Peer.any_ipv4(), ec2.Port.tcp(80), "HTTP")
-            shared_sg.add_ingress_rule(ec2.Peer.any_ipv4(), ec2.Port.tcp(8000), "service port")
             shared_sg.add_ingress_rule(ec2.Peer.any_ipv4(), ec2.Port.tcp(5432), "postgres")
-            self.alb_sg = shared_sg
             self.service_sg = shared_sg
             self.db_sg = shared_sg
         else:
-            self.alb_sg = ec2.SecurityGroup(self, "AlbSg", vpc=self.vpc, description="Pantry preview ALB")
-            self.alb_sg.add_ingress_rule(ec2.Peer.any_ipv4(), ec2.Port.tcp(80), "HTTP from anywhere")
-            self.service_sg = ec2.SecurityGroup(self, "ServiceSg", vpc=self.vpc, description="Pantry ECS tasks")
-            self.service_sg.add_ingress_rule(self.alb_sg, ec2.Port.tcp(8000), "ALB to tasks")
-            self.service_sg.add_ingress_rule(self.service_sg, ec2.Port.tcp(8000), "intra-env Service Connect")
-            self.db_sg = ec2.SecurityGroup(self, "DbSg", vpc=self.vpc, description="Aurora cluster")
-            self.db_sg.add_ingress_rule(self.service_sg, ec2.Port.tcp(5432), "tasks and lambda to Postgres")
+            self.service_sg = ec2.SecurityGroup(
+                self,
+                "ServiceSg",
+                vpc=self.vpc,
+                description="Per-env service Lambdas (and the db_bootstrap Lambda)",
+                allow_all_outbound=True,
+            )
+            self.db_sg = ec2.SecurityGroup(
+                self,
+                "DbSg",
+                vpc=self.vpc,
+                description="Aurora cluster",
+            )
+            self.db_sg.add_ingress_rule(self.service_sg, ec2.Port.tcp(5432), "service Lambdas to Postgres")
 
         self.db_secret = rds.DatabaseSecret(self, "DbSecret", username="postgres")
 
@@ -152,29 +156,6 @@ class BaselineStack(Stack):
                 removal_policy=RemovalPolicy.DESTROY,
                 deletion_protection=False,
             )
-
-        self.cluster = ecs.Cluster(
-            self,
-            "EcsCluster",
-            vpc=self.vpc,
-        )
-
-        self.alb = elbv2.ApplicationLoadBalancer(
-            self,
-            "Alb",
-            vpc=self.vpc,
-            internet_facing=True,
-            security_group=self.alb_sg,
-        )
-        self.listener = self.alb.add_listener(
-            "HttpListener",
-            port=80,
-            default_action=elbv2.ListenerAction.fixed_response(
-                404,
-                content_type="text/plain",
-                message_body="no preview env matched this path",
-            ),
-        )
 
         # `empty_on_delete=True` and lifecycle rules add a custom-resource Lambda
         # (`AutoDeleteImages`) that Ministack can't run. Skip those features in
@@ -269,11 +250,12 @@ class BaselineStack(Stack):
             )
         )
 
-        # The db_bootstrap Lambda is only useful when EnvironmentStack invokes it
-        # via a CFN custom resource. On Ministack we skip it because the
-        # cr.Provider framework Lambdas also can't reach the cluster endpoint
-        # from inside a Lambda container; a host-side script (scripts/bootstrap-dbs.py)
-        # creates the per-env databases instead.
+        # db_bootstrap Lambda: only used by EnvironmentStack's CFN custom resource
+        # to create/drop the per-env logical databases on the shared Aurora
+        # cluster. On Ministack we skip it because the cr.Provider framework
+        # Lambdas can't reach the cluster endpoint from inside a Lambda
+        # container; a host-side script (scripts/bootstrap-dbs.py) handles
+        # per-env DB creation instead.
         if ministack_mode:
             self.db_bootstrap_fn = None
         else:
@@ -307,8 +289,6 @@ class BaselineStack(Stack):
             )
             self.db_secret.grant_read(self.db_bootstrap_fn)
 
-        CfnOutput(self, "AlbDnsName", value=self.alb.load_balancer_dns_name)
-        CfnOutput(self, "ClusterName", value=self.cluster.cluster_name)
         CfnOutput(self, "EcrPantryUri", value=self.ecr_pantry.repository_uri)
         CfnOutput(self, "EcrShoppingUri", value=self.ecr_shopping.repository_uri)
         CfnOutput(self, "GhaDeployRoleArn", value=self.deploy_role.role_arn)

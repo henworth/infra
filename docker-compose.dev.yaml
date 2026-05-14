@@ -6,6 +6,10 @@
 #     shopping-list/
 # Run from inside this directory:
 #   docker compose -f docker-compose.dev.yaml up --build
+#
+# The service Dockerfiles use the AWS Lambda Python base image (so the same
+# artifact runs on Lambda). For local dev we override the Lambda Runtime
+# Interface Client (entrypoint) and instead run uvicorn with --reload.
 services:
   postgres:
     image: postgres:16
@@ -29,8 +33,11 @@ services:
     environment:
       DATABASE_URL: postgresql+psycopg://app:app@postgres:5432/pantry_db
       API_PREFIX: /pantry
+    entrypoint: []
     command:
       [
+        "python",
+        "-m",
         "uvicorn",
         "app.main:app",
         "--host",
@@ -40,7 +47,7 @@ services:
         "--reload",
       ]
     volumes:
-      - ../pantry/app:/app/app:ro
+      - ../pantry/app:/var/task/app:ro
     ports:
       - "8000:8000"
     healthcheck:
@@ -59,8 +66,11 @@ services:
       DATABASE_URL: postgresql+psycopg://app:app@postgres:5432/shopping_db
       API_PREFIX: /shopping
       PANTRY_INTERNAL_URL: http://pantry:8000/pantry
+    entrypoint: []
     command:
       [
+        "python",
+        "-m",
         "uvicorn",
         "app.main:app",
         "--host",
@@ -70,7 +80,7 @@ services:
         "--reload",
       ]
     volumes:
-      - ../shopping-list/app:/app/app:ro
+      - ../shopping-list/app:/var/task/app:ro
     ports:
       - "8001:8000"
     healthcheck:

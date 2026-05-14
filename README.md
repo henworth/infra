@@ -19,40 +19,48 @@ The full algorithm lives in [`scripts/reconcile.py`](scripts/reconcile.py).
 
 ## Stacks
 
-- **`BaselineStack`** (long-lived, deployed once per region): VPC, Aurora Serverless v2 cluster, ECS cluster, shared ALB, ECR repos, GitHub OIDC provider + deploy role, and the `db_bootstrap` Lambda invoked by per-env stacks.
-- **`EnvironmentStack-<envName>`** (one per preview env): per-env Cloud Map namespace for Service Connect, custom resource that creates the per-env logical databases on the shared Aurora cluster, Fargate services for `pantry` and `shopping-list`, target groups, and listener rules on the shared ALB at `/<envName>/pantry/*` and `/<envName>/shopping/*`.
+- **`BaselineStack`** (long-lived, deployed once per region): VPC + NAT, Aurora Serverless v2 cluster, ECR repos, GitHub OIDC provider + deploy role, and the `db_bootstrap` Lambda invoked by per-env stacks.
+- **`EnvironmentStack-<envName>`** (one per preview env): a CFN custom resource that creates per-env logical databases on the shared Aurora cluster, plus two container-image Lambdas (`pantry`, `shopping-list`) each with its own [Lambda Function URL](https://docs.aws.amazon.com/lambda/latest/dg/urls-configuration.html). Auth is `NONE` — the URLs are unguessable and the environments are short-lived preview-only.
 
 ```mermaid
 flowchart LR
     GhaPantry["GHA: pantry repo"]
     GhaShopping["GHA: shopping-list repo"]
     subgraph baseline [BaselineStack: long-lived]
-        VPC[VPC]
-        ALB["Shared ALB :80"]
-        ECS[ECS Cluster]
+        VPC["VPC + NAT"]
         Aurora[("Aurora Serverless v2 Postgres")]
         EcrPantry[("ECR: pantry")]
         EcrShopping[("ECR: shopping-list")]
         OIDC[GitHub OIDC + DeployRole]
+        Bootstrap["db_bootstrap Lambda"]
     end
     subgraph envFG ["EnvironmentStack-fg-feat-foo"]
-        SvcPantry["pantry (Service Connect)"]
-        SvcShopping["shopping-list (Service Connect)"]
+        FnPantry["pantry Lambda + Function URL"]
+        FnShopping["shopping-list Lambda + Function URL"]
         DBs[("pantry_db_fg_feat_foo + shopping_db_fg_feat_foo")]
     end
     GhaPantry -->|"push image"| EcrPantry
     GhaShopping -->|"push image"| EcrShopping
     GhaPantry -->|"OIDC + cdk deploy/destroy"| baseline
     GhaShopping -->|"OIDC + cdk deploy/destroy"| baseline
-    EcrPantry --> SvcPantry
-    EcrShopping --> SvcShopping
-    ALB -->|"/fg-feat-foo/pantry/*"| SvcPantry
-    ALB -->|"/fg-feat-foo/shopping/*"| SvcShopping
-    SvcShopping -->|"Service Connect"| SvcPantry
-    SvcPantry --> Aurora
-    SvcShopping --> Aurora
+    EcrPantry --> FnPantry
+    EcrShopping --> FnShopping
+    FnShopping -->|"HTTPS to PANTRY_INTERNAL_URL"| FnPantry
+    FnPantry --> Aurora
+    FnShopping --> Aurora
+    Bootstrap -.->|"creates"| DBs
     Aurora --- DBs
 ```
+
+### Why Lambda (and not Fargate)
+
+Preview environments are idle most of the time and get destroyed within days of being created. That pattern fits Lambda's pricing model exactly:
+
+- **Cost.** A Fargate task at 0.25 vCPU / 0.5 GB is ~$8/mo always-on; five concurrent preview envs × 2 services = $80/mo of baseline whether anyone uses them. Lambdas at preview traffic rates are functionally free.
+- **Spin-up.** A new Lambda + Function URL is ready in seconds. New Fargate services need to pull images, start containers, and pass ALB target health checks (60–120s).
+- **Smaller infra per env.** No target group, no listener rule, no ECS service, no Service Connect namespace, no NAT-vs-public-subnet decisions. Per-env stack is two Lambdas + two Function URLs + a DB-bootstrap custom resource.
+
+Trade-offs: cold starts (~1–2s on the first request to a recently-idle env) and inter-service calls happen over public HTTPS (Function URL → public internet → Function URL) rather than in-VPC Service Connect. Both are acceptable for previews. For a production-shape deployment you'd likely want API Gateway or an ALB in front (with WAF / auth) and possibly RDS Proxy.
 
 ## Local dev: full-stack demo (no AWS)
 
@@ -171,9 +179,8 @@ We chose [Ministack](https://ministack.org/) over LocalStack for local AWS emula
 - OIDC provider → `AccountRootPrincipal`-trust role
 - `cr.Provider` DB bootstrap → host-side [`scripts/bootstrap-dbs.py`](scripts/bootstrap-dbs.py)
 - Aurora cluster → host-side [`scripts/ministack-create-db.py`](scripts/ministack-create-db.py) (creates a Postgres DB instance via the RDS API)
-- NAT gateways → public subnets + `assign_public_ip=true`
-- inter-SG ingress → single shared SG with CIDR-only inline rules
-- L2 target group / listener rule → L1 `CfnTargetGroup` / `CfnListenerRule` (avoids CDK's automatic SG-to-SG ingress)
+- NAT gateways → omitted (Lambdas run without VPC config in Ministack mode; the Ministack-managed Postgres container is reachable via `host.docker.internal`)
+- Service Lambdas: deployed without VPC config (no SG-to-SG ingress, no ENI provisioning quirks)
 
 Bring up the emulator (state persists in `./.ministack/`):
 
@@ -183,9 +190,7 @@ bash scripts/ministack-up.sh                # push initial images
 bash scripts/cdklocal-deploy.sh fg-demo     # deploys baseline, creates RDS+DBs, deploys env
 ```
 
-**Verified on Ministack 1.3.37:** `BaselineStack` reaches `CREATE_COMPLETE` (~27 resources). `ministack-create-db.py` provisions Postgres and emits host (`localhost:<port>`) and container (`host.docker.internal:<port>`) endpoints. `bootstrap-dbs.py` creates per-env logical DBs.
-
-**Known limitation:** `EnvironmentStack` deploy fails on Ministack 1.3.37 with `Unsupported resource type: AWS::ElasticLoadBalancingV2::TargetGroup`. Bridging that would mean further out-of-band scripts (`elbv2.create_target_group` + `create_rule`) and attaching the ECS service to externally-managed ARNs — at which point the CDK code stops being the source of truth. For a running-services demo, use `docker-compose.dev.yaml`.
+Switching from ECS+ALB to Lambda significantly improves Ministack compatibility: the unsupported resources we used to hit (`AWS::ElasticLoadBalancingV2::TargetGroup`, `AWS::ElasticLoadBalancingV2::ListenerRule`, `AWS::EC2::SecurityGroupIngress`) are no longer emitted by `EnvironmentStack`. Re-verify against your Ministack version before relying on it for the full env stack.
 
 ## GitHub configuration
 
@@ -219,11 +224,11 @@ If you have a GitHub org, promote `AWS_DEPLOY_ROLE` and `INFRA_REPO` to org-leve
 
 ## What's intentionally not implemented
 
-- Auth (Cognito + ALB authorizer).
+- Auth on the Function URLs (`AUTH_NONE`; URLs are unguessable but unauthenticated). For production this becomes `AWS_IAM` + SigV4 inter-service calls, or fronting with API Gateway + Cognito.
+- Custom domain / HTTPS cert (Function URLs come with their own `*.lambda-url.<region>.on.aws` HTTPS endpoint).
 - Alembic migrations (using `Base.metadata.create_all` on startup).
 - Async SQLAlchemy.
-- HTTPS / ACM on the ALB.
-- Per-env subdomains (we chose path-prefix on the shared ALB).
+- RDS Proxy (recommended at production scale to avoid connection storms from many warm Lambdas).
 - Seeding per-env databases from `main` (`pg_dump | pg_restore` hook in the bootstrap Lambda is an easy add).
 - A DynamoDB env-registry (CloudFormation stack listing is the source of truth).
 - Tests beyond `/healthz` smoke checks.
