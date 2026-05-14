@@ -11,7 +11,7 @@ on:
       - "scripts/build-lambdas.sh"
       - "pyproject.toml"
       - "uv.lock"
-      - ".github/workflows/baseline.yml"
+      - ".github/workflows/baseline.yaml"
   workflow_dispatch:
 
 permissions:

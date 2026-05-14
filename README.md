@@ -190,8 +190,6 @@ bash scripts/ministack-up.sh                # push initial images
 bash scripts/cdklocal-deploy.sh fg-demo     # deploys baseline, creates RDS+DBs, deploys env
 ```
 
-Switching from ECS+ALB to Lambda significantly improves Ministack compatibility: the unsupported resources we used to hit (`AWS::ElasticLoadBalancingV2::TargetGroup`, `AWS::ElasticLoadBalancingV2::ListenerRule`, `AWS::EC2::SecurityGroupIngress`) are no longer emitted by `EnvironmentStack`. Re-verify against your Ministack version before relying on it for the full env stack.
-
 ## GitHub configuration
 
 Three repos, three secret/var scopes. `AWS_DEPLOY_ROLE` is the role ARN exported by `BaselineStack` as `GhaDeployRoleArn`.

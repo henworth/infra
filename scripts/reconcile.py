@@ -1,14 +1,18 @@
 #!/usr/bin/env python3
 """Reconcile preview environments from a GitHub event.
 
-Called by the per-repo `preview.yml` GitHub Actions workflow.
+Called by the per-repo `preview.yaml` GitHub Actions workflow.
 
 Inputs (CLI flags, all required unless noted):
   --this-repo      pantry | shopping-list
   --other-repo     pantry | shopping-list
   --branch         feature branch name (head_ref). Main is rejected.
   --event          upsert | delete
-  --this-image-tag commit SHA pushed to ECR (required for upsert)
+  --this-image-tag commit SHA pushed to ECR (required for upsert). For
+    GitHub pull_request workflows use the PR head commit
+    (github.event.pull_request.head.sha), not github.sha — the latter is the
+    ephemeral merge ref and will not match GET /repos/.../branches/{branch}
+    used to resolve the other repo's image tag in feature-group deploys.
 
 Optional env:
   GITHUB_TOKEN     used for `gh api repos/...` calls
