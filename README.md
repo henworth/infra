@@ -1,6 +1,6 @@
 # infra — Preview Environments CDK App
 
-The control plane for two FastAPI services ([`pantry`](https://github.com/your-org/pantry), [`shopping-list`](https://github.com/your-org/shopping-list)) and their ephemeral per-feature-branch preview environments on AWS. Python CDK, managed with `uv`.
+The control plane for two FastAPI services ([`pantry`](https://github.com/henworth/pantry), [`shopping-list`](https://github.com/henworth/shopping-list)) and their ephemeral per-feature-branch preview environments on AWS. Python CDK, managed with `uv`.
 
 Solves the "single shared dev environment" problem by spinning up isolated copies of the stack per feature branch, with cross-repo branch correlation so a "feature group" spanning both services gets a single combined env.
 
